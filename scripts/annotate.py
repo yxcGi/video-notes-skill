@@ -11,7 +11,7 @@ spec.json 结构：
     {
       "name": "输出文件名.png",
       "frame": "源帧文件名.png",
-      "boxes": [ {"rect": [x1, y1, x2, y2], "label": "① 说明文字"} ],
+      "boxes": [ {"rect": [x1, y1, x2, y2], "label": "① 说明文字", "ev": "26:07"} ],   # ev=该标签在转写稿里的讲解时间戳，缺失会告警
       "notes": ["无框的整图说明（自动找全图最空处放置）"]
     }
   ]
@@ -30,8 +30,14 @@ import hashlib
 import json
 import os
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+try:
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError as e:
+    raise SystemExit(
+        f"缺依赖（{e.name}）。本脚本须在 conda data_processing 环境运行：\n"
+        "  source /opt/homebrew/Caskroom/miniconda/base/etc/profile.d/conda.sh "
+        "&& conda activate data_processing")
 
 RED = (225, 30, 30)
 PAD = 9
@@ -192,6 +198,76 @@ def place(im, boxes, notes):
     return placed, warns
 
 
+def leader_endpoints(rect, box):
+    """标签 rect → 红框 box 的引线两端点；不需要画引线时返回 None。
+    render 与排版 lint 共用，保证检查的就是实际画出来的那条线。"""
+    rx1, ry1, rx2, ry2 = [int(v) for v in rect]
+    lx = rx1 if rx1 > box[2] else rx2 if rx2 < box[0] else (rx1 + rx2) // 2
+    ly = (ry1 + ry2) // 2 if (rx1 > box[2] or rx2 < box[0]) else (ry1 if ry1 > box[3] else ry2)
+    bx = box[0] if lx <= box[0] else box[2] if lx >= box[2] else (box[0] + box[2]) // 2
+    by = box[1] if ly <= box[1] else box[3] if ly >= box[3] else (box[1] + box[3]) // 2
+    if abs(lx - bx) + abs(ly - by) <= 20:
+        return None
+    return (lx, ly), (bx, by)
+
+
+def seg_hits_rect(p, q, r, pad=2):
+    """线段 pq 是否穿过矩形 r 内部（Liang-Barsky 裁剪判定）。"""
+    (x1, y1), (x2, y2) = p, q
+    xmin, ymin, xmax, ymax = r[0] + pad, r[1] + pad, r[2] - pad, r[3] - pad
+    if xmin >= xmax or ymin >= ymax:
+        return False
+    dx, dy = x2 - x1, y2 - y1
+    t0, t1 = 0.0, 1.0
+    for p_, q_ in ((-dx, x1 - xmin), (dx, xmax - x1), (-dy, y1 - ymin), (dy, ymax - y1)):
+        if p_ == 0:
+            if q_ < 0:
+                return False
+        else:
+            t = q_ / p_
+            if p_ < 0:
+                if t > t1:
+                    return False
+                t0 = max(t0, t)
+            else:
+                if t < t0:
+                    return False
+                t1 = min(t1, t)
+    return t0 <= t1
+
+
+def wide_chars(text):
+    """全角等效字符数（CJK 记 1，其余两个记 1）。"""
+    n = sum(2 if ord(c) > 0x2E7F else 1 for c in text)
+    return (n + 1) // 2
+
+
+def lint_item(item, placed, W):
+    """渲染前后都不改变成品的静态排版检查，问题以告警返回。"""
+    warns = []
+    boxes = item.get("boxes", [])
+    for b in boxes:
+        if "ev" not in b:
+            warns.append(f"标签「{b['label']}」缺讲解依据 ev 字段——确认讲师真讲过，否则下沉正文")
+        if wide_chars(b["label"]) > 14:
+            warns.append(f"标签「{b['label']}」超 14 全角字符——序数/口诀/推导下沉正文")
+    for rect, box, text in placed:
+        if box is None:                     # notes
+            if (rect[2] - rect[0]) > W * 0.9:
+                warns.append(f"整图说明「{text[:18]}…」渲染宽 {int(rect[2]-rect[0])}px 近乎横穿画布——压缩成一句")
+            continue
+        lead = leader_endpoints(rect, box)
+        if not lead:
+            continue
+        for other in boxes:
+            r = other["rect"]
+            if list(r) == list(box):
+                continue
+            if seg_hits_rect(lead[0], lead[1], r):
+                warns.append(f"引线穿框：指向 {list(box)} 的引线穿过了「{other['label']}」的红框——调整两框相对位置或改 notes")
+    return warns
+
+
 def render(im, boxes, placed):
     d = ImageDraw.Draw(im)
     for b in boxes:
@@ -199,11 +275,9 @@ def render(im, boxes, placed):
     for rect, box, text in placed:
         rx1, ry1, rx2, ry2 = [int(v) for v in rect]
         if box:
-            lx = rx1 if rx1 > box[2] else rx2 if rx2 < box[0] else (rx1 + rx2) // 2
-            ly = (ry1 + ry2) // 2 if (rx1 > box[2] or rx2 < box[0]) else (ry1 if ry1 > box[3] else ry2)
-            bx = box[0] if lx <= box[0] else box[2] if lx >= box[2] else (box[0] + box[2]) // 2
-            by = box[1] if ly <= box[1] else box[3] if ly >= box[3] else (box[1] + box[3]) // 2
-            if abs(lx - bx) + abs(ly - by) > 20:
+            lead = leader_endpoints(rect, box)
+            if lead:
+                (lx, ly), (bx, by) = lead
                 d.line([(lx, ly), (bx, by)], fill=RED, width=2)
                 d.ellipse([bx - 4, by - 4, bx + 4, by + 4], fill=RED)
         d.rounded_rectangle(rect, radius=5, fill=RED)
@@ -224,6 +298,7 @@ if __name__ == "__main__":
         try:
             im = Image.open(os.path.join(spec["frames_dir"], item["frame"])).convert("RGB")
             placed, warns = place(im, item.get("boxes", []), item.get("notes", []))
+            warns += lint_item(item, placed, im.size[0])
             im = render(im, item.get("boxes", []), placed)
             im.save(os.path.join(spec["out_dir"], name))
         except Exception as e:  # 异常必须带上是哪张图，否则几十张配置里无从定位
@@ -233,4 +308,4 @@ if __name__ == "__main__":
             all_warns += 1
     total = sum(os.path.getsize(os.path.join(spec["out_dir"], f)) for f in os.listdir(spec["out_dir"]))
     print(f"{len(spec['images'])} 张 → {spec['out_dir']}（目录合计 {total/1048576:.1f} MB）"
-          + (f"，{all_warns} 处压盖告警" if all_warns else ""))
+          + (f"，{all_warns} 处告警" if all_warns else ""))
