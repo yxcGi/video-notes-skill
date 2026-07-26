@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# 运行产物（视频、抽帧、成图、标注配置）一律不入库
+*.mp4
+*.png
+*.jpg
+frames_*/
+sheets*/
+shots*/
+spec*.json
