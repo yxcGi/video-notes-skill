@@ -134,3 +134,7 @@ skill 默认只能用户手动 `/video-notes` 调用（`disable-model-invocation
 
 - 版本管理从 v1.7 起，此前 v1.0~v1.6 的演进只有 CHANGELOG 记录，没有代码快照。
 - 产出的笔记仅供个人学习使用；本仓库只含流水线本身，不含任何课程内容或笔记成品。
+
+## License
+
+[MIT](LICENSE)
