@@ -200,6 +200,10 @@ def place(im, boxes, notes):
             warns.append(f"「{b['label']}」无空位，已压盖放置——红框可能画得太大")
         placed.append((best, b["rect"], b["label"]))
         hard.append(best)
+    # 整图说明的落点：靠近画面内容重心的空白处。
+    # 早期版本用 cy*0.12 偏好上方，结果说明条系统性贴到画布顶端，离它描述的内容很远。
+    ys, xs = np.nonzero(ink)
+    gx, gy = (float(xs.mean()), float(ys.mean())) if xs.size else (W / 2, H / 2)
     for text in notes:
         lw, lh = label_size(d0, text)
         best, best_cost = None, None
@@ -208,7 +212,8 @@ def place(im, boxes, notes):
                 rect = (cx, cy, cx + lw, cy + lh)
                 if any(overlaps(rect, h) for h in hard):
                     continue
-                cost = region_std(gray, rect) * 6 + cy * 0.12
+                far = math.hypot((cx + lw / 2) - gx, (cy + lh / 2) - gy)
+                cost = region_std(gray, rect) * 6 + far * 0.20
                 if best_cost is None or cost < best_cost:
                     best, best_cost = rect, cost
         if best is None:
