@@ -160,6 +160,7 @@ def place(im, boxes, notes):
     """返回 (placed, warns)。找不到空位时降级为压盖放置并回报警告，不再返回 None。"""
     W, H = im.size
     gray = np.asarray(im.convert("L"), dtype=np.float32)
+    ink = ink_mask(gray)
     d0 = ImageDraw.Draw(im)
     hard = [b["rect"] for b in boxes]
     placed, warns = [], []
@@ -183,7 +184,15 @@ def place(im, boxes, notes):
                 continue
             s = region_std(gray, rect)
             dist = abs((cx + lw / 2) - (x1 + x2) / 2) + abs((cy + lh / 2) - (y1 + y2) / 2)
-            cost = s * 6 + dist * 0.5 + side * 60
+            # 引线横穿正文/穿过别的红框都很伤观感，且事后无从补救
+            # （标签位置就是在这里定的），故一并纳入代价而不是事后告警
+            lead = leader_endpoints(rect, b["rect"])
+            cross = seg_ink(ink, lead[0], lead[1]) if lead else 0.0
+            thru = 0
+            if lead:
+                thru = sum(1 for o in boxes if list(o["rect"]) != list(b["rect"])
+                           and seg_hits_rect(lead[0], lead[1], o["rect"]))
+            cost = s * 6 + dist * 0.5 + side * 60 + cross * 900 + thru * 700
             if best_cost is None or cost < best_cost:
                 best, best_cost = rect, cost
         if best is None:
@@ -281,8 +290,14 @@ def edge_cuts(ink, rect, side, out=4):
     关键区分：边线压在笔画上 ≠ 切断内容。
     - 框贴着控件/代码块的外边框画 → 边线有墨，但**框外**紧邻处是空白 → 正确做法，不报。
     - 边线落在单词或字符中间   → 边线有墨，且**框外**紧邻处墨水延续 → 内容被拦腰截断 → 报。
+    - 框住的是云图/等值面等**连续色块**（框内墨水占比极高）→ "截断"概念不适用 → 不报。
+      实测分界很干净：文字与代码框内占比 7~18%，云图与等值面框内占比 91~100%。
     返回 (是否切断, 边线墨水占比)。
     """
+    x1, y1, x2, y2 = [int(v) for v in rect]
+    inner = ink[max(0, y1):y2, max(0, x1):x2]
+    if inner.size and float(inner.mean()) > 0.60:
+        return False, 0.0
     inside = edge_ink(ink, rect, side)
     if inside <= 0.16:
         return False, inside
@@ -338,7 +353,12 @@ def seq_no(label):
 
 
 def order_warns(boxes):
-    """编号顺序应与空间顺序一致：先上下、同一带内再左右。全部有编号才检查。"""
+    """编号顺序应与空间顺序一致：先上下、同一带内再左右。全部有编号才检查。
+
+    例外：编号也可以表示**操作先后**。若各标签的 ev 时间戳随编号递增，说明这组编号
+    记的是讲师的操作顺序（如自下而上依次点三个控件），此时空间顺序必须让位——
+    照空间重排会把操作步骤讲错，比观感问题严重得多。
+    """
     items = []
     for b in boxes:
         k = seq_no(b.get("label", ""))
@@ -347,6 +367,9 @@ def order_warns(boxes):
         r = b["rect"]
         items.append((k, (r[1] + r[3]) / 2, (r[0] + r[2]) / 2, b["label"]))
     if len(items) < 2:
+        return []
+    evs = [b.get("ev", "") for b in boxes]
+    if all(evs) and evs == sorted(evs):
         return []
     band = max(40.0, np.mean([b["rect"][3] - b["rect"][1] for b in boxes]) * 0.9)
     spatial = sorted(items, key=lambda t: (round(t[1] / band), t[2]))
